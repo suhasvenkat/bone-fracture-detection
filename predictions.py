@@ -12,13 +12,7 @@ ELBOW_MODEL_PATH = os.path.join(BASE_DIR, "weights", "ResNet50_Elbow_frac.h5")
 HAND_MODEL_PATH = os.path.join(BASE_DIR, "weights", "ResNet50_Hand_frac.h5")
 SHOULDER_MODEL_PATH = os.path.join(BASE_DIR, "weights", "ResNet50_Shoulder_frac.h5")
 
-# Debug (helps Streamlit logs)
-print("Loading models from:")
-print(BODY_MODEL_PATH)
-
-# Check files exist
-if not os.path.exists(BODY_MODEL_PATH):
-    raise FileNotFoundError(f"Missing model file: {BODY_MODEL_PATH}")
+print("Loading models from:", BASE_DIR)
 
 # Load models
 body_model = load_model(BODY_MODEL_PATH)
@@ -36,18 +30,64 @@ def preprocess(img):
     return img
 
 
+# -----------------------------
+# GradCAM
+# -----------------------------
+def make_gradcam_heatmap(img_array, model, last_conv_layer_name="conv5_block3_out"):
+
+    grad_model = tf.keras.models.Model(
+        [model.inputs],
+        [model.get_layer(last_conv_layer_name).output, model.output],
+    )
+
+    with tf.GradientTape() as tape:
+
+        conv_outputs, predictions = grad_model(img_array)
+        loss = predictions[:, 0]
+
+    grads = tape.gradient(loss, conv_outputs)
+
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+
+    conv_outputs = conv_outputs[0]
+
+    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
+
+    heatmap = np.maximum(heatmap, 0) / np.max(heatmap)
+
+    return heatmap.numpy()
+
+
+def overlay_heatmap(heatmap, original_img):
+
+    heatmap = cv2.resize(heatmap, (original_img.shape[1], original_img.shape[0]))
+    heatmap = np.uint8(255 * heatmap)
+
+    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+
+    superimposed = cv2.addWeighted(original_img, 0.6, heatmap, 0.4, 0)
+
+    return superimposed
+
+
+# -----------------------------
+# Prediction Pipeline
+# -----------------------------
 def predict(image):
+
+    original_img = image.copy()
 
     img = preprocess(image)
 
-    # Step 1: body part classification
+    # Step 1: detect body part
     body_pred = body_model.predict(img)
     body_class = np.argmax(body_pred)
 
     body_parts = ["Elbow", "Hand", "Shoulder"]
     body_part = body_parts[body_class]
 
-    # Step 2: choose fracture model
+    # Step 2: select fracture model
     if body_part == "Elbow":
         model = elbow_model
     elif body_part == "Hand":
@@ -60,9 +100,13 @@ def predict(image):
 
     if fracture_prob > 0.5:
         label = "Fracture"
-        confidence = fracture_prob
+        confidence = float(fracture_prob)
     else:
         label = "Normal"
-        confidence = 1 - fracture_prob
+        confidence = float(1 - fracture_prob)
 
-    return body_part, label, confidence
+    # Step 4: GradCAM
+    heatmap = make_gradcam_heatmap(img, model)
+    heatmap_img = overlay_heatmap(heatmap, original_img)
+
+    return body_part, label, confidence, heatmap_img
