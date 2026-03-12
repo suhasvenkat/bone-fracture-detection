@@ -1,87 +1,53 @@
-import numpy as np
+import os
 import cv2
-import tensorflow as tf
+import numpy as np
 from tensorflow.keras.models import load_model
 
-# load trained model
-model = load_model("weights/fracture_model.h5")
+BASE_DIR = os.path.dirname(__file__)
+
+# Load models
+body_model = load_model(os.path.join(BASE_DIR, "weights/ResNet50_BodyParts.h5"))
+elbow_model = load_model(os.path.join(BASE_DIR, "weights/ResNet50_Elbow_frac.h5"))
+hand_model = load_model(os.path.join(BASE_DIR, "weights/ResNet50_Hand_frac.h5"))
+shoulder_model = load_model(os.path.join(BASE_DIR, "weights/ResNet50_Shoulder_frac.h5"))
 
 IMG_SIZE = 224
 
 
-def preprocess_image(image):
-    img = cv2.resize(image, (IMG_SIZE, IMG_SIZE))
+def preprocess(img):
+    img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
     img = img / 255.0
     img = np.expand_dims(img, axis=0)
     return img
 
 
-# -----------------------------
-# Grad-CAM
-# -----------------------------
-def make_gradcam_heatmap(img_array, model, last_conv_layer_name):
-
-    grad_model = tf.keras.models.Model(
-        [model.inputs],
-        [model.get_layer(last_conv_layer_name).output, model.output],
-    )
-
-    with tf.GradientTape() as tape:
-        conv_outputs, predictions = grad_model(img_array)
-        class_index = tf.argmax(predictions[0])
-        class_channel = predictions[:, class_index]
-
-    grads = tape.gradient(class_channel, conv_outputs)
-
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-
-    conv_outputs = conv_outputs[0]
-
-    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
-    heatmap = tf.squeeze(heatmap)
-
-    heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
-
-    return heatmap.numpy()
-
-
-def overlay_heatmap(heatmap, original_image, alpha=0.4):
-
-    heatmap = cv2.resize(heatmap, (original_image.shape[1], original_image.shape[0]))
-    heatmap = np.uint8(255 * heatmap)
-
-    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-
-    superimposed = heatmap * alpha + original_image
-
-    return superimposed.astype("uint8")
-
-
-# -----------------------------
-# Prediction function
-# -----------------------------
 def predict(image):
 
-    original_img = image.copy()
+    img = preprocess(image)
 
-    img_array = preprocess_image(image)
+    # Step 1: detect body part
+    body_pred = body_model.predict(img)
+    body_class = np.argmax(body_pred)
 
-    prediction = model.predict(img_array)[0][0]
+    body_parts = ["Elbow", "Hand", "Shoulder"]
+    body_part = body_parts[body_class]
 
-    if prediction > 0.5:
+    # Step 2: choose correct fracture model
+    if body_part == "Elbow":
+        model = elbow_model
+    elif body_part == "Hand":
+        model = hand_model
+    else:
+        model = shoulder_model
+
+    # Step 3: fracture prediction
+    fracture_prob = model.predict(img)[0][0]
+
+    if fracture_prob > 0.5:
         label = "Fracture"
-        confidence = prediction
+        confidence = fracture_prob
     else:
         label = "Normal"
-        confidence = 1 - prediction
+        confidence = 1 - fracture_prob
 
-    # generate GradCAM
-    heatmap = make_gradcam_heatmap(
-        img_array,
-        model,
-        last_conv_layer_name="conv2d_3"   # change if your last conv layer name is different
-    )
-
-    heatmap_image = overlay_heatmap(heatmap, original_img)
-
-    return label, confidence, heatmap_image
+    return body_part, label, confidence
