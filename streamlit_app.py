@@ -1,6 +1,7 @@
 import streamlit as st
+import cv2
+import numpy as np
 from PIL import Image
-import tempfile
 from predictions import predict
 
 st.set_page_config(
@@ -27,60 +28,49 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file is not None:
 
-    image = Image.open(uploaded_file)
+    image = Image.open(uploaded_file).convert("RGB")
 
-    st.image(image, caption="Uploaded X-ray", use_container_width=True)
+    image_np = np.array(image)
 
-    if st.button("Run Prediction"):
+    st.subheader("Uploaded X-ray")
+    st.image(image, width='stretch')
 
-        with st.spinner("Analyzing X-ray..."):
+    with st.spinner("Analyzing X-ray..."):
 
-            try:
+        label, confidence, heatmap = predict(image_np)
 
-                # save temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                    image.save(tmp.name)
-                    image_path = tmp.name
+    st.subheader("Prediction Result")
 
-                # STEP 1: Detect bone type
-                bone_type = predict(image_path, "Parts")
+    if label == "Fracture":
+        st.error(f"⚠️ Fracture detected ({confidence*100:.2f}% confidence)")
+    else:
+        st.success(f"✅ Normal bone ({confidence*100:.2f}% confidence)")
 
-                if bone_type.startswith("Not identified"):
-                    st.error("❌ Bone type could not be identified.")
-                else:
+    st.subheader("Fracture Localization (Grad-CAM)")
 
-                    # STEP 2: Detect fracture
-                    fracture_result = predict(image_path, bone_type)
+    col1, col2 = st.columns(2)
 
-                    st.subheader("Prediction Result")
+    with col1:
+        st.image(image, caption="Original X-ray", width='stretch')
 
-                    col1, col2 = st.columns(2)
-
-                    with col1:
-                        st.info(f"Bone Type: **{bone_type}**")
-
-                    with col2:
-
-                        if fracture_result == "fractured":
-                            st.error("⚠️ Fracture Detected")
-                        else:
-                            st.success("✅ No Fracture Detected")
-
-            except Exception as e:
-                st.error(f"Error during prediction: {str(e)}")
-
+    with col2:
+        st.image(heatmap, caption="Grad-CAM Heatmap", width='stretch')
 
 st.markdown("---")
 
-st.markdown(
+st.subheader("Project Information")
+
+st.write(
 """
-### Project Information
+This deep learning system uses **Convolutional Neural Networks (CNNs)**  
+to analyze medical X-ray images and detect bone fractures.
 
-This deep learning system:
+The model performs:
 
-• Classifies **bone type (Elbow, Hand, Shoulder, Wrist)**  
-• Detects **fractures using CNN models**  
-• Built using **TensorFlow / Keras**
+• Bone classification  
+• Fracture detection  
+• Visual explanation using **Grad-CAM**
 
+Grad-CAM highlights the regions of the X-ray that most influenced the model's prediction.
 """
 )

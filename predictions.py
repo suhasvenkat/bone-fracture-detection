@@ -1,94 +1,87 @@
 import numpy as np
-import tensorflow as tf
-from keras.preprocessing import image
 import cv2
-from PIL import Image
-import os
+import tensorflow as tf
+from tensorflow.keras.models import load_model
+
+# load trained model
+model = load_model("weights/fracture_model.h5")
+
+IMG_SIZE = 224
 
 
-model_elbow_frac = tf.keras.models.load_model("weights/ResNet50_Elbow_frac.h5")
-model_hand_frac = tf.keras.models.load_model("weights/ResNet50_Hand_frac.h5")
-model_shoulder_frac = tf.keras.models.load_model("weights/ResNet50_Shoulder_frac.h5")
-model_parts = tf.keras.models.load_model("weights/ResNet50_BodyParts.h5")
+def preprocess_image(image):
+    img = cv2.resize(image, (IMG_SIZE, IMG_SIZE))
+    img = img / 255.0
+    img = np.expand_dims(img, axis=0)
+    return img
 
 
-categories_parts = ["Elbow", "Hand", "Shoulder"]
+# -----------------------------
+# Grad-CAM
+# -----------------------------
+def make_gradcam_heatmap(img_array, model, last_conv_layer_name):
 
-categories_fracture = ['fractured', 'normal']
+    grad_model = tf.keras.models.Model(
+        [model.inputs],
+        [model.get_layer(last_conv_layer_name).output, model.output],
+    )
 
+    with tf.GradientTape() as tape:
+        conv_outputs, predictions = grad_model(img_array)
+        class_index = tf.argmax(predictions[0])
+        class_channel = predictions[:, class_index]
 
-def is_xray_image(image_path):
-    """
-    Simple check if the uploaded image is likely an X-ray image
-    Returns True if it appears to be an X-ray, False otherwise
-    """
-    try:
-        # Load image
-        img = cv2.imread(image_path)
-        if img is None:
-            return False, "Could not load image"
-        
-        # Convert to grayscale
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        
-        # Basic checks for X-ray characteristics
-        mean_brightness = np.mean(gray)
-        std_brightness = np.std(gray)
-        
-        # Very basic validation - just check if it's not too bright or too dark
-        # and has some contrast
-        is_likely_xray = (
-            5 < mean_brightness < 250 and
-            std_brightness > 5
-        )
-        
-        # Check for face detection (if face is detected, it's likely not an X-ray)
-        try:
-            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-            faces = face_cascade.detectMultiScale(gray, 1.1, 4)
-            
-            if len(faces) > 0:
-                return False, "Image appears to contain a face, not an X-ray"
-        except:
-            # If face detection fails, continue with other checks
-            pass
-        
-        if not is_likely_xray:
-            return False, "Image doesn't appear to be an X-ray. Please upload a proper X-ray image."
-        
-        return True, "Valid X-ray image"
-        
-    except Exception as e:
-        return False, f"Error validating image: {str(e)}"
+    grads = tape.gradient(class_channel, conv_outputs)
+
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+
+    conv_outputs = conv_outputs[0]
+
+    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
+
+    heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
+
+    return heatmap.numpy()
 
 
-def predict(img, model="Parts"):
-    # Check if the image is an X-ray
-    is_valid, message = is_xray_image(img)
-    if not is_valid:
-        return f"Not identified: {message}"
-    size = 224
-    if model == 'Parts':
-        chosen_model = model_parts
+def overlay_heatmap(heatmap, original_image, alpha=0.4):
+
+    heatmap = cv2.resize(heatmap, (original_image.shape[1], original_image.shape[0]))
+    heatmap = np.uint8(255 * heatmap)
+
+    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+
+    superimposed = heatmap * alpha + original_image
+
+    return superimposed.astype("uint8")
+
+
+# -----------------------------
+# Prediction function
+# -----------------------------
+def predict(image):
+
+    original_img = image.copy()
+
+    img_array = preprocess_image(image)
+
+    prediction = model.predict(img_array)[0][0]
+
+    if prediction > 0.5:
+        label = "Fracture"
+        confidence = prediction
     else:
-        if model == 'Elbow':
-            chosen_model = model_elbow_frac
-        elif model == 'Hand':
-            chosen_model = model_hand_frac
-        elif model == 'Shoulder':
-            chosen_model = model_shoulder_frac
+        label = "Normal"
+        confidence = 1 - prediction
 
-   
-    temp_img = image.load_img(img, target_size=(size, size))
-    x = image.img_to_array(temp_img)
-    x = np.expand_dims(x, axis=0)
-    images = np.vstack([x])
-    prediction = np.argmax(chosen_model.predict(images), axis=1)
+    # generate GradCAM
+    heatmap = make_gradcam_heatmap(
+        img_array,
+        model,
+        last_conv_layer_name="conv2d_3"   # change if your last conv layer name is different
+    )
 
-    
-    if model == 'Parts':
-        prediction_str = categories_parts[prediction.item()]
-    else:
-        prediction_str = categories_fracture[prediction.item()]
+    heatmap_image = overlay_heatmap(heatmap, original_img)
 
-    return prediction_str
+    return label, confidence, heatmap_image
