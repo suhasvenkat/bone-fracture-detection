@@ -37,17 +37,26 @@ if uploaded_file is not None:
 
     with st.spinner("Analyzing X-ray..."):
 
-        body_part, label, confidence = predict(image_np)
+        body_part, label, confidence, heatmap = predict(image_np)
 
     st.subheader("Prediction Result")
 
-    st.write(f"**Detected Bone:** {body_part}")
+    st.write(f"Detected Bone: **{body_part}**")
 
     if label == "Fracture":
         st.error(f"⚠️ Fracture detected ({confidence*100:.2f}% confidence)")
     else:
         st.success(f"✅ Normal bone ({confidence*100:.2f}% confidence)")
 
+    st.subheader("Fracture Localization (Grad-CAM)")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.image(image, caption="Original X-ray", width="stretch")
+
+    with col2:
+        st.image(heatmap, caption="Grad-CAM Heatmap", width="stretch")
 
 st.markdown("---")
 
@@ -55,7 +64,8 @@ st.subheader("Project Information")
 
 st.write(
 """
-This deep learning system uses **ResNet50 convolutional neural networks** to analyze medical X-ray images.
+This deep learning system uses **ResNet50 convolutional neural networks**
+to analyze medical X-ray images.
 
 The pipeline works in two stages:
 
@@ -65,8 +75,8 @@ The pipeline works in two stages:
 - Shoulder
 
 2️⃣ **Fracture detection**
-- A specialized model for each bone type
+- Separate models for each bone type
 
-This approach improves accuracy by allowing the fracture model to specialize in a specific anatomical region.
+Grad-CAM is used to highlight the region of the X-ray that influenced the prediction.
 """
 )
